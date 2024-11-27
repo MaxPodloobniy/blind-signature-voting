@@ -11,13 +11,37 @@ class Commission:
         Ініціалізація комісії. Включає генерацію ключів для зв'язку та підпису.
         """
         self.private_comm_key, self.public_comm_key = generate_rsa_keys()
-        self.private_sign_key, self.public_sign_key = generate_rsa_keys()
-        self.voters_data = voters_tax_numbers
+        self.voters_data = pd.DataFrame({
+            'tax_number': voters_tax_numbers,
+            'is_registered': np.zeros(len(voters_tax_numbers))
+        })
+        self.voters_data = self.voters_data.set_index('tax_number')
         self.candidates_data = pd.DataFrame({
             'Name': candidates_names,
             'Votes_Count': np.zeros(len(candidates_names))
         })
         self.received_ballots = {}
+
+    def check_ballots_identity(self, current_ballot):
+        # Розбиваємо бюлетені на компоненти
+        current_ballot_parts = current_ballot.split('|')
+
+        # Перевірка чи зареєстрований цей виборець в списках
+        if current_ballot_parts[1] not in self.voters_data.index.tolist():
+            raise ValueError("Виборця з таким ID не існує")
+
+        # Перевірка чи не голосував виборець раніше
+        if self.voters_data.loc[current_ballot_parts[1], 'is_registered'] != 0:
+            raise ValueError("Виборець за таким ID вже зареєстрований")
+
+        # Перевірка коректності вибору кандидата
+        voter_choice = int(current_ballot_parts[2])
+        if voter_choice < 1 or voter_choice > len(self.candidates_data):
+            raise ValueError("Неправильний вибір кандидата")
+
+        # Перевірка формату бюлетеня
+        if len(current_ballot_parts) != 3:
+            raise ValueError("Бюлетень складений некоректно")
 
     def register_ballot(self, ballot_kit: list[list[dict]], blind_ballots: list[bytes], bs: BlindSignature) -> list[tuple[bytes, int]]:
         """
@@ -29,15 +53,10 @@ class Commission:
         :return: Список сліпих підписів.
         """
         blind_signatures = []
+        curr_voter_id = 0
 
         # Перевірка ідентичності бюлетенів
         for ballot_box in ballot_kit:
-            # Розшифровуємо перший бюлетень як попередній
-            prev_ballot_id = rsa_decrypt(ballot_box[0]['ballot_id'], self.private_comm_key)
-            prev_voter_id = rsa_decrypt(ballot_box[0]['voter_id'], self.private_comm_key)
-            prev_voter_choice = rsa_decrypt(ballot_box[0]['voter_choice'], self.private_comm_key)
-            prev_ballot = f"{prev_ballot_id}|{prev_voter_id}|{prev_voter_choice}" # Треба для перевірки
-
             for ballot in ballot_box:
                 # Розшифровуємо поточний бюлетень
                 ballot_id = rsa_decrypt(ballot['ballot_id'], self.private_comm_key)
@@ -46,13 +65,8 @@ class Commission:
                 current_ballot = f"{ballot_id}|{voter_id}|{voter_choice}"
 
                 # Перевіряємо ідентичність
-                # is_equal = check_ballots_identity(current_ballot, prev_ballot)
-                is_equal = True
-
-                if not is_equal:
-                    raise ValueError("Подані на реєстрацію бюлетені не ідентичні!")
-
-                prev_ballot = current_ballot
+                self.check_ballots_identity(current_ballot)
+                curr_voter_id = voter_id
 
         # Створення сліпих підписів
         for hidden_ballot, encrypted_aes_key in blind_ballots:
@@ -62,6 +76,9 @@ class Commission:
             # Створюємо підпис
             signature = bs.sign_blinded_message(decrypted_hidden_ballot)
             blind_signatures.append(signature)
+
+        # Якщо перевірку пройдено, то вважаємо що цей виброець проголосував
+        self.voters_data.loc[curr_voter_id, 'is_registered'] += 1
 
         return blind_signatures
 
@@ -93,7 +110,7 @@ class Commission:
         if ballot_id in self.received_ballots.keys():
             raise ValueError("Бюлетень з таким ID вже зарахований")
         else:
-            self.received_ballots[ballot_id] = ballot
+            self.received_ballots.update({f'{ballot_id}': ballot})
 
         # Отримання голосу виборця, перевірка чи є такий кандидат і зарахування голосу якщо є
         candidate_number = data[2]
